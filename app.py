@@ -1,188 +1,586 @@
+
+# app.py — Streamlit Prototype: Student/Teacher Q&A Checker
+# - Student can append unlimited questions before preview/submit
+# - Safe Back/Next, progress clamped
+# - Optional edit of question text per submission
 import streamlit as st
+import sqlite3
 import pandas as pd
-import gspread
-from oauth2client.service_account import ServiceAccountCredentials
-from datetime import datetime
+from datetime import date
 
-# -------------------------------------
-# CONFIG
-# -------------------------------------
-SPREADSHEET_ID = "16t3Vc8DmnnMzrBqTQPXT4g_b96d9FEKwflQIxaLyZEw"
-STUDENT_SHEET = "Student List"
-RESPONSE_SHEET = "Response"
+DB_PATH = "answers.db"
 
-# -------------------------------------
-# GOOGLE SHEET CONNECT
-# -------------------------------------
-def connect_sheet():
-    scope = [
-        "https://www.googleapis.com/auth/spreadsheets",
-        "https://www.googleapis.com/auth/drive"
-    ]
-    creds = ServiceAccountCredentials.from_json_keyfile_name("credentials.json", scope)
-    client = gspread.authorize(creds)
+# Local safety; on Streamlit Cloud this exists
+if not st.runtime.exists():
+    print("\n[!] Please run with:  streamlit run app.py\n")
+    raise SystemExit
 
-    spreadsheet = client.open_by_key(SPREADSHEET_ID)
+# ---------- DB Utilities ----------
+def get_con():
+    return sqlite3.connect(DB_PATH)
 
-    student_ws = spreadsheet.worksheet(STUDENT_SHEET)      # แท็บรายชื่อนักศึกษา
-    response_ws = spreadsheet.worksheet(RESPONSE_SHEET)    # แท็บส่งงาน
+def init_db():
+    con = get_con()
+    cur = con.cursor()
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS answers (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            student_id TEXT NOT NULL,
+            date_week TEXT NOT NULL,
+            question_no INTEGER NOT NULL,
+            question TEXT NOT NULL,
+            answer TEXT NOT NULL,
+            group_name TEXT,
+            checked INTEGER DEFAULT 0
+        );
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS questions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            date_week TEXT NOT NULL,
+            question_no INTEGER NOT NULL,
+            question TEXT NOT NULL,
+            UNIQUE(date_week, question_no) ON CONFLICT REPLACE
+        );
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS student_logins (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            student_id TEXT NOT NULL,
+            date_week TEXT NOT NULL,
+            logged_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(student_id, date_week) ON CONFLICT IGNORE
+        );
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS class_scores (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            student_id TEXT NOT NULL,
+            date_week TEXT NOT NULL,
+            score REAL,
+            note TEXT,
+            UNIQUE(student_id, date_week) ON CONFLICT REPLACE
+        );
+        """
+    )
+    cur.execute("PRAGMA table_info(answers)")
+    existing_cols = [row[1] for row in cur.fetchall()]
+    if "group_name" not in existing_cols:
+        cur.execute("ALTER TABLE answers ADD COLUMN group_name TEXT")
 
-    return student_ws, response_ws
+    con.commit()
+    con.close()
+
+DEFAULT_QUESTIONS = [
+    "Explain one key concept you learned today.",
+    "Give an example related to the concept.",
+    "What is one question you still have?"
+]
+
+def load_questions(date_week:str|None):
+    if not date_week:
+        return DEFAULT_QUESTIONS.copy()
+    con = get_con()
+    df = pd.read_sql_query(
+        "SELECT question_no, question FROM questions WHERE date_week=? ORDER BY question_no",
+        con, params=[date_week]
+    )
+    con.close()
+    if df.empty:
+        return DEFAULT_QUESTIONS.copy()
+    q = df.sort_values("question_no")["question"].tolist()
+    return q if len(q) > 0 else DEFAULT_QUESTIONS.copy()
+
+def save_question_set(date_week:str, questions:list[str]):
+    con = get_con()
+    cur = con.cursor()
+    cur.execute("DELETE FROM questions WHERE date_week=?", (date_week,))
+    for idx, q in enumerate([q.strip() for q in questions], start=1):
+        if q:
+            cur.execute("INSERT INTO questions (date_week, question_no, question) VALUES (?,?,?)",
+                        (date_week, idx, q))
+    con.commit(); con.close()
+
+def list_question_dates():
+    con = get_con()
+    df = pd.read_sql_query("SELECT DISTINCT date_week FROM questions ORDER BY date_week DESC", con)
+    con.close(); return df["date_week"].tolist()
+
+def list_answer_dates():
+    con = get_con()
+    df = pd.read_sql_query("SELECT DISTINCT date_week FROM answers ORDER BY date_week DESC", con)
+    con.close(); return df["date_week"].tolist()
+
+def save_answers(student_id, date_week, qa_list, group_name=""):
+    con = get_con(); cur = con.cursor()
+    cur.execute("DELETE FROM answers WHERE student_id=? AND date_week=?", (student_id, date_week))
+    for qno, qtext, ans in qa_list:
+        cur.execute(
+            "INSERT INTO answers (student_id, date_week, question_no, question, answer, group_name, checked) VALUES (?,?,?,?,?,?,0)",
+            (student_id, date_week, qno, qtext, ans, group_name.strip())
+        )
+    con.commit(); con.close()
+
+def load_answers(date_week=None, student_search=""):
+    con = get_con()
+    where, params = [], []
+    if date_week:
+        where.append("date_week = ?"); params.append(date_week)
+    if student_search:
+        where.append("student_id LIKE ?"); params.append(f"%{student_search}%")
+    wh = (" WHERE " + " AND ".join(where)) if where else ""
+    df = pd.read_sql_query(
+        f"SELECT id, student_id, date_week, question_no, question, answer, group_name, checked FROM answers{wh} ORDER BY student_id, question_no",
+        con, params=params
+    )
+    con.close(); return df
+
+def update_checked(ids, checked=True):
+    if not ids: return
+    con = get_con(); cur = con.cursor()
+    cur.execute(
+        f"UPDATE answers SET checked = ? WHERE id IN ({','.join(['?']*len(ids))})",
+        [1 if checked else 0, *ids]
+    )
+    con.commit(); con.close()
 
 
-def sheet_to_df(ws):
-    return pd.DataFrame(ws.get_all_records())
+def log_student_login(student_id: str, date_week: str) -> None:
+    """Record a student login for the class scoring list."""
+    if not student_id or not date_week:
+        return
+    con = get_con(); cur = con.cursor()
+    cur.execute(
+        "INSERT OR IGNORE INTO student_logins (student_id, date_week) VALUES (?, ?)",
+        (student_id, date_week),
+    )
+    con.commit(); con.close()
 
-# -------------------------------------
-# TEACHER LOGIN SYSTEM
-# -------------------------------------
-TEACHERS = {
-    "teacher": "admin123",   # ตัวอย่าง
-    "admin": "password"
-}
 
-if "teacher_logged_in" not in st.session_state:
-    st.session_state.teacher_logged_in = False
+def list_logged_students(date_week: str | None = None) -> pd.DataFrame:
+    """Return DataFrame of students who pressed Login."""
+    con = get_con()
+    if date_week:
+        df = pd.read_sql_query(
+            "SELECT student_id, date_week, logged_at FROM student_logins WHERE date_week=? ORDER BY logged_at",
+            con,
+            params=[date_week],
+        )
+    else:
+        df = pd.read_sql_query(
+            "SELECT student_id, date_week, logged_at FROM student_logins ORDER BY logged_at DESC",
+            con,
+        )
+    con.close()
+    return df
 
-def teacher_login_page():
-    st.title("🔐 Teacher Login")
 
-    username = st.text_input("Username")
-    password = st.text_input("Password", type="password")
+def load_class_scores(date_week: str | None) -> pd.DataFrame:
+    con = get_con()
+    if date_week:
+        df = pd.read_sql_query(
+            "SELECT student_id, date_week, score, note FROM class_scores WHERE date_week=?",
+            con,
+            params=[date_week],
+        )
+    else:
+        df = pd.read_sql_query(
+            "SELECT student_id, date_week, score, note FROM class_scores",
+            con,
+        )
+    con.close()
+    return df
 
-    if st.button("เข้าสู่ระบบ (Teacher)"):
-        if username in TEACHERS and TEACHERS[username] == password:
-            st.session_state.teacher_logged_in = True
-            st.success("เข้าสู่ระบบสำเร็จ!")
-            st.experimental_rerun()
+
+def save_class_scores(date_week: str, score_rows) -> None:
+    con = get_con(); cur = con.cursor()
+    for student_id, score, note in score_rows:
+        cur.execute(
+            "INSERT INTO class_scores (student_id, date_week, score, note) VALUES (?,?,?,?)",
+            (student_id, date_week, score, note),
+        )
+    con.commit(); con.close()
+
+
+def load_answer_counts(date_week: str | None) -> dict[str, int]:
+    """Return number of answers submitted per student for given date."""
+    if not date_week:
+        return {}
+    con = get_con()
+    df = pd.read_sql_query(
+        "SELECT student_id, COUNT(*) AS total FROM answers WHERE date_week=? GROUP BY student_id",
+        con,
+        params=[date_week],
+    )
+    con.close()
+    if df.empty:
+        return {}
+    return dict(zip(df["student_id"], df["total"]))
+
+# ---------- App ----------
+init_db()
+st.set_page_config(page_title="Q&A Checker", page_icon="✅", layout="centered")
+
+# session defaults
+st.session_state.setdefault("started", False)
+st.session_state.setdefault("q_index", 0)
+st.session_state.setdefault("answers", DEFAULT_QUESTIONS.copy())
+st.session_state.setdefault("show_preview", False)
+st.session_state.setdefault("teacher_loaded", False)
+st.session_state.setdefault("current_questions", DEFAULT_QUESTIONS.copy())
+st.session_state.setdefault("allow_edit_question", True)  # default ON for convenience
+st.session_state.setdefault("group_name", "")
+
+st.title("📚 Simple Student/Teacher Q&A Checker")
+
+tab_student, tab_teacher = st.tabs(["👩‍🎓 Student", "👨‍🏫 Teacher"])
+
+
+# ---------------- Student ----------------
+with tab_student:
+    st.subheader("Start")
+    col1, col2 = st.columns(2)
+    with col1:
+        student_id = st.text_input("Student ID", placeholder="e.g., S001")
+    with col2:
+        date_week = st.text_input("Date / Week", value=str(date.today()), help="Use same label as teacher's question set.")
+
+    start_col, login_col = st.columns([1,1])
+    with start_col:
+        start = st.button("✅ START", use_container_width=True)
+    with login_col:
+        login_clicked = st.button("🔐 LOGIN", use_container_width=True)
+
+    selected_date = date_week.strip() or str(date.today())
+
+    if login_clicked:
+        if not student_id.strip():
+            st.warning("Please enter Student ID before logging in.")
         else:
-            st.error("❌ Username หรือ Password ไม่ถูกต้อง")
+            log_student_login(student_id.strip(), selected_date)
+            st.success("Login sent to teacher for attendance/scoring.")
 
-# -------------------------------------
-# START APP
-# -------------------------------------
-st.set_page_config(page_title="Design Thinking System", layout="wide")
-st.title("📋 ระบบส่งงาน / ให้คะแนน / สรุปผล")
-
-student_ws, response_ws = connect_sheet()
-
-# LOGOUT BUTTON
-if st.session_state.teacher_logged_in:
-    if st.button("Logout (Teacher)"):
-        st.session_state.teacher_logged_in = False
-        st.experimental_rerun()
-
-# -------------------------------------
-# SHOW TABS BASED ON ROLE
-# -------------------------------------
-if st.session_state.teacher_logged_in:
-    tabs = st.tabs(["Student", "Teacher", "Summary"])
-else:
-    tabs = st.tabs(["Student"])
-
-# =====================================================
-# STUDENT TAB
-# =====================================================
-with tabs[0]:
-    st.header("👨‍🎓 Student — ส่งงาน")
-
-    with st.form("student_form", clear_on_submit=True):
-        emp_id = st.text_input("Student ID")
-        name = st.text_input("ชื่อ - นามสกุล")
-        ans1 = st.text_area("คำตอบข้อที่ 1")
-        ans2 = st.text_area("คำตอบข้อที่ 2")
-        submit = st.form_submit_button("ส่งงาน")
-
-    if submit:
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-        response_ws.append_row([
-            timestamp,
-            emp_id,
-            name,
-            ans1,
-            ans2,
-            "",       # Score
-            "",       # Comment
-            "รอตรวจ"
-        ])
-
-        st.success("ส่งงานสำเร็จ ✔")
-
-# =====================================================
-# TEACHER TAB
-# =====================================================
-if st.session_state.teacher_logged_in:
-    with tabs[1]:
-        st.header("👨‍🏫 Teacher — ให้คะแนน")
-
-        df_response = sheet_to_df(response_ws)
-
-        if df_response.empty:
-            st.warning("ยังไม่มีนักศึกษาส่งงาน")
+    if start:
+        if not student_id.strip():
+            st.warning("Please enter Student ID.")
         else:
-            st.subheader("📄 ข้อมูลการส่งงานทั้งหมด")
-            st.dataframe(df_response)
+            question_set = load_questions(selected_date)
+            if not question_set:
+                question_set = [""]
+            st.session_state.current_questions = question_set
+            st.session_state.answers = [""] * len(question_set)
+            st.session_state.q_index = 0
+            st.session_state.started = True
+            st.session_state.show_preview = False
+            st.session_state.group_name = ""
+            st.session_state.pop("group_name_input", None)
 
-            student_list = df_response["StudentID"].unique()
-            selected_id = st.selectbox("เลือก Student ID", student_list)
+    if st.session_state.started:
+        st.divider()
+        questions = st.session_state.get("current_questions", DEFAULT_QUESTIONS).copy()
+        total = len(questions)
 
-            stu_data = df_response[df_response["StudentID"] == selected_id]
-            rec = stu_data.iloc[-1]  # งานล่าสุด
+        # Ensure at least 1
+        if total <= 0:
+            questions = [""]; total = 1
+            st.session_state.current_questions = questions
+            st.session_state.answers = [""]
 
-            st.write("### ✏️ คำตอบล่าสุด:")
-            st.write("**คำตอบข้อ 1:**")
-            st.write(rec["Answer1"])
-            st.write("**คำตอบข้อ 2:**")
-            st.write(rec["Answer2"])
+        q_idx = max(0, min(st.session_state.q_index, total-1))
+        st.session_state.q_index = q_idx
+        progress_value = max(0.0, min((q_idx + 1) / total, 1.0))
+        st.progress(progress_value, text=f"ข้อ {q_idx+1}")
 
-            new_score = st.number_input("คะแนน (0 - 100)", 0, 100)
-            new_comment = st.text_area("ความคิดเห็นเพิ่มเติม")
+        # Editable question text (per submission)
+        key_q = f"q_{q_idx}"
+        edited_q = st.text_input("Question", value=questions[q_idx], key=key_q,
+                                 placeholder="Type your question here")
+        questions[q_idx] = edited_q
+        st.session_state.current_questions = questions
 
-            if st.button("บันทึกคะแนน"):
-                all_rows = response_ws.get_all_values()
-                target_row = None
+        # Answer box
+        if len(st.session_state.answers) != total:
+            st.session_state.answers = (st.session_state.answers + [""]*total)[:total]
+        key_a = f"a_{q_idx}"
+        st.session_state.answers[q_idx] = st.text_area("Your Answer",
+                                                       value=st.session_state.answers[q_idx],
+                                                       height=140, key=key_a)
 
-                for i, row in enumerate(all_rows):
-                    if row[0] == rec["Timestamp"] and row[1] == rec["StudentID"]:
-                        target_row = i + 1
-                        break
+        group_value = st.text_input(
+            "Group Name (optional)",
+            key="group_name_input",
+            help="Leave blank if not applicable."
+        )
+        st.session_state.group_name = group_value.strip()
 
-                if target_row:
-                    response_ws.update_cell(target_row, 6, str(new_score))
-                    response_ws.update_cell(target_row, 7, new_comment)
-                    response_ws.update_cell(target_row, 8, "ตรวจแล้ว")
-                    st.success("บันทึกคะแนนสำเร็จ ✔")
+        # Validation for current step
+        current_q_filled = questions[q_idx].strip() != ""
+        current_a_filled = st.session_state.answers[q_idx].strip() != ""
+        allow_next = current_q_filled and current_a_filled
+
+        # Controls row
+        c1, c2 = st.columns([1,1])
+        with c1:
+            if st.button("⬅️ Back", use_container_width=True, disabled=(q_idx==0)):
+                st.session_state.q_index = max(0, q_idx-1)
+                st.session_state.show_preview = False
+        with c2:
+            if st.button("➡️ Next", use_container_width=True, disabled=not allow_next, key=f"next_btn_{q_idx}"):
+                if q_idx >= len(st.session_state.current_questions) - 1:
+                    st.session_state.current_questions.append("")
+                    st.session_state.answers.append("")
+                st.session_state.q_index = min(len(st.session_state.current_questions)-1, q_idx+1)
+                st.session_state.show_preview = False
+                st.rerun()
+
+        # Check if all filled for preview
+        all_filled = all(q.strip() != "" for q in st.session_state.current_questions) and \
+                     all(a.strip() != "" for a in st.session_state.answers[:len(st.session_state.current_questions)])
+
+        # Preview & submit buttons
+        if st.button("👁️ Preview", use_container_width=True, disabled=not all_filled):
+            st.session_state.show_preview = True
+        if not all_filled:
+            st.info("กรุณากรอก 'คำถาม' และ 'คำตอบ' ให้ครบทุกข้อก่อนกด Preview/Submit")
+
+        if st.session_state.get("show_preview"):
+            st.subheader("Preview & Submit")
+            questions = st.session_state.current_questions
+            total = len(questions)
+            df_prev = pd.DataFrame({
+                "Question No.": list(range(1,total+1)),
+                "Question": questions,
+                "Answer": st.session_state.answers[:total],
+                "Group": [st.session_state.get("group_name", "")] * total
+            })
+            st.dataframe(df_prev, use_container_width=True, hide_index=True)
+            colp1, colp2 = st.columns([2,1])
+            with colp2:
+                # Safety: still verify before saving
+                if st.button("🟦 SUBMIT", use_container_width=True, disabled=not all_filled):
+                    qa = [(i+1, questions[i].strip(), st.session_state.answers[i].strip()) for i in range(total)]
+                    save_answers(
+                        student_id.strip(),
+                        date_week.strip(),
+                        qa,
+                        st.session_state.get("group_name", "")
+                    )
+                    st.success("Your answers have been submitted successfully!")
+                    # reset for new submission
+                    st.session_state.started = False
+                    st.session_state.q_index = 0
+                    st.session_state.answers = [""] * len(DEFAULT_QUESTIONS)
+                    st.session_state.show_preview = False
+                    st.session_state.group_name = ""
+                    st.session_state.pop("group_name_input", None)
+# ---------------- Teacher ----------------
+with tab_teacher:
+    st.subheader("Manage Questions & Check Answers")
+    access_code = st.text_input("Teacher Access Code", type="password", placeholder="Enter password")
+
+    if access_code.strip() != "1234":
+        st.info("กรุณากรอกรหัสผ่าน เพื่อจัดการชุดคำถามและตรวจคำตอบ")
+    else:
+        m1, m2 = st.columns([1,1])
+        with m1:
+            teacher_name = st.text_input("Teacher Name", placeholder="e.g., Ms. June")
+        with m2:
+            manage_date = st.text_input("Date / Week (for Question Set)", value=str(date.today()))
+
+        with st.expander("📝 Edit Question Set for this Date/Week", expanded=True):
+            existing_dates = list_question_dates()
+            if existing_dates:
+                st.caption("Load from saved sets:")
+                load_select = st.selectbox("Saved dates", options=["(select)"] + existing_dates, index=0)
+                if load_select != "(select)":
+                    manage_date = load_select
+                    st.session_state["tmp_questions"] = load_questions(manage_date)
+
+            if "tmp_questions" not in st.session_state:
+                st.session_state["tmp_questions"] = load_questions(manage_date)
+
+            num = st.number_input("Number of questions", min_value=1, max_value=30, value=len(st.session_state["tmp_questions"]), step=1)
+            qlist = st.session_state["tmp_questions"]
+            if len(qlist) < num:
+                qlist = qlist + [""]*(num-len(qlist))
+            elif len(qlist) > num:
+                qlist = qlist[:num]
+
+            new_questions = []
+            for i in range(int(num)):
+                new_questions.append(st.text_input(f"Q{i+1}", value=qlist[i], placeholder=f"Enter question {i+1}"))
+            st.session_state["tmp_questions"] = new_questions
+
+            cqs1, cqs2, cqs3 = st.columns([1,1,1])
+            with cqs1:
+                if st.button("💾 Save Question Set", use_container_width=True):
+                    save_question_set(manage_date.strip(), new_questions)
+                    st.success(f"Saved {len(new_questions)} questions for {manage_date}.")
+            with cqs2:
+                if st.button("🔄 Reset to Default", use_container_width=True):
+                    st.session_state["tmp_questions"] = DEFAULT_QUESTIONS.copy()
+            with cqs3:
+                if st.button("📥 Load Current Saved", use_container_width=True):
+                    st.session_state["tmp_questions"] = load_questions(manage_date.strip())
+
+        st.divider()
+
+        c1, c2, c3 = st.columns([1,1,1])
+        with c1:
+            filter_date = st.text_input("Filter Date / Week", value=manage_date, placeholder="YYYY-MM-DD")
+        with c2:
+            student_search = st.text_input("Search Student ID", placeholder="e.g., S001")
+        with c3:
+            start_check = st.button("✅ START (Load)", use_container_width=True)
+
+        answer_dates = list_answer_dates()
+        effective_filter = filter_date.strip()
+        if answer_dates:
+            history_options = ["ใช้วันที่กรอกด้านบน", "ดูทุกวัน"] + answer_dates
+            selected_history = st.selectbox("เลือกจากประวัติคำตอบ", history_options, index=0, key="answer_history_select")
+            if selected_history == "ดูทุกวัน":
+                effective_filter = ""
+            elif selected_history != "ใช้วันที่กรอกด้านบน":
+                effective_filter = selected_history
+
+        if start_check:
+            st.session_state.teacher_loaded = True
+
+        if st.session_state.get("teacher_loaded"):
+            df = load_answers(effective_filter or None, student_search.strip())
+            if df.empty:
+                st.info("No data found. Try adjusting filters or ask students to submit.")
+            else:
+                df["checked"] = df["checked"].astype(bool)
+                st.caption("Filter columns (case-insensitive):")
+                filter_inputs = {}
+                header_cols = st.columns(len(df.columns))
+                for idx, col_name in enumerate(df.columns):
+                    with header_cols[idx]:
+                        filter_inputs[col_name] = st.text_input(
+                            f"🔍 {col_name}",
+                            key=f"filter_{col_name}",
+                            placeholder="",
+                        )
+                filtered_df = df.copy()
+                for column, keyword in filter_inputs.items():
+                    if keyword:
+                        filtered_df = filtered_df[
+                            filtered_df[column].astype(str).str.contains(keyword, case=False, na=False)
+                        ]
+
+                if filtered_df.empty:
+                    st.info("ไม่พบข้อมูลตามตัวกรอง")
                 else:
-                    st.error("ไม่พบข้อมูลใน Google Sheet")
+                    st.write("Toggle ✅ to mark answers as checked.")
+                    edited = st.data_editor(
+                        filtered_df.copy(),
+                        column_config={
+                            "checked": st.column_config.CheckboxColumn("check"),
+                            "question_no": st.column_config.NumberColumn("question"),
+                            "group_name": st.column_config.TextColumn("group"),
+                        },
+                        disabled=["id", "student_id", "date_week", "question_no", "question", "answer", "group_name"],
+                        hide_index=True,
+                        use_container_width=True,
+                        key="teacher_table",
+                    )
+                    edited["checked"] = edited["checked"].astype(bool)
+                    original_checks = df.set_index("id")["checked"]
+                    edited_checks = edited.set_index("id")["checked"]
+                    base_checks = original_checks.reindex(edited_checks.index).fillna(False).astype(bool)
+                    changed_to_true_ids = edited_checks[(edited_checks) & (~base_checks)].index.tolist()
+                    changed_to_false_ids = edited_checks[(~edited_checks) & (base_checks)].index.tolist()
 
-# =====================================================
-# SUMMARY TAB
-# =====================================================
-if st.session_state.teacher_logged_in:
-    with tabs[2]:
-        st.header("📊 Summary — สรุปผลทั้งหมด")
+                    colu1, colu2, colu3, colu4 = st.columns([1,1,1,1])
+                    with colu1:
+                        if st.button("💾 Save Checks", use_container_width=True):
+                            update_checked(changed_to_true_ids, True)
+                            update_checked(changed_to_false_ids, False)
+                            st.success("Saved check status.")
+                    with colu2:
+                        if st.button("☑️ Mark All as Checked", use_container_width=True):
+                            update_checked(edited["id"].tolist(), True)
+                            st.success("All rows marked as checked.")
+                    with colu3:
+                        if st.button("🧹 Clear All Checks", use_container_width=True):
+                            update_checked(edited["id"].tolist(), False)
+                            st.success("All rows cleared.")
+                    with colu4:
+                        csv = edited.to_csv(index=False).encode("utf-8")
+                        st.download_button("⬇️ Export CSV", csv, file_name=f"answers_{(effective_filter or 'all')}.csv", mime="text/csv", use_container_width=True)
 
-        df_students = sheet_to_df(student_ws)
-        df_response = sheet_to_df(response_ws)
 
-        if df_response.empty:
-            st.warning("ยังไม่มีผู้ส่งงาน")
-            st.stop()
+        with st.expander("🎯 Class Scoring", expanded=False):
+            score_date = manage_date.strip()
+            logged_students = list_logged_students(score_date)
+            scores_df = load_class_scores(score_date)
+            answer_counts = load_answer_counts(score_date)
+            all_ids = sorted(
+                set(logged_students["student_id"].tolist()) | set(scores_df["student_id"].tolist())
+            )
+            if not all_ids:
+                st.info("ยังไม่มีนักเรียนกด Login สำหรับวันที่นี้")
+            else:
+                existing_scores = {row["student_id"]: row["score"] for _, row in scores_df.iterrows()} if not scores_df.empty else {}
+                score_state_key = f"class_scores_values_{score_date}"
+                if (score_state_key not in st.session_state) or (st.session_state.get("class_scores_date") != score_date):
+                    st.session_state["class_scores_date"] = score_date
+                    st.session_state[score_state_key] = {sid: existing_scores.get(sid, 0.0) for sid in all_ids}
+                else:
+                    # ensure newly logged students appear with default score
+                    for sid in all_ids:
+                        st.session_state[score_state_key].setdefault(sid, existing_scores.get(sid, 0.0))
 
-        df_response["Score"] = pd.to_numeric(df_response["Score"], errors="coerce")
+                st.markdown("**Students & Scores**")
+                header_cols = st.columns([3,1,1,1])
+                header_cols[0].markdown("**Student ID**")
+                header_cols[1].markdown("**−**")
+                header_cols[2].markdown("**Score**")
+                header_cols[3].markdown("**+**")
 
-        df_latest = df_response.sort_values("Timestamp").groupby("StudentID").last().reset_index()
+                score_map = st.session_state[score_state_key]
+                for sid in all_ids:
+                    cols = st.columns([3,1,1,1])
+                    cols[0].write(sid)
+                    if cols[1].button("➖", key=f"score_minus_{score_date}_{sid}"):
+                        score_map[sid] = score_map.get(sid, 0.0) - 1
+                        st.session_state[score_state_key] = score_map
+                        st.rerun()
+                    cols[2].markdown(f"<div style='text-align:center;font-weight:bold;'>{score_map.get(sid,0)}</div>", unsafe_allow_html=True)
+                    if cols[3].button("➕", key=f"score_plus_{score_date}_{sid}"):
+                        score_map[sid] = score_map.get(sid, 0.0) + 1
+                        st.session_state[score_state_key] = score_map
+                        st.rerun()
 
-        summary = df_students.merge(df_latest, how="left", left_on="StudentID", right_on="StudentID")
+                summary_rows = []
+                for sid in all_ids:
+                    answer_score = answer_counts.get(sid, 0)
+                    class_score = score_map.get(sid, 0.0)
+                    summary_rows.append(
+                        {
+                            "Student ID": sid,
+                            "Answers": answer_score,
+                            "Class Score": class_score,
+                            "Total": answer_score + (class_score or 0),
+                        }
+                    )
+                st.markdown("**รวมคะแนนจากการตอบ + คะแนนในคลาส**")
+                st.dataframe(pd.DataFrame(summary_rows), hide_index=True, use_container_width=True)
 
-        summary = summary.replace("", pd.NA)
+                if st.button("💾 Save Scores", use_container_width=True, key="save_scores"):
+                    rows = [
+                        (sid, score_map.get(sid, 0.0), "")
+                        for sid in all_ids
+                    ]
+                    save_class_scores(score_date, rows)
+                    st.success("บันทึกคะแนนเรียบร้อยแล้ว")
 
-        st.subheader("📄 ตารางสรุปผล")
-        st.dataframe(summary)
-
-        if summary["Score"].notna().any():
-            st.subheader("📈 กราฟคะแนน")
-            st.bar_chart(summary.set_index("StudentID")["Score"])
-        else:
-            st.info("ยังไม่มีคะแนนให้แสดง")
+        st.caption("Tip: Students can append extra questions before submitting. Default question set is provided by the teacher per Date/Week.")
