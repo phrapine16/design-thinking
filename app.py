@@ -326,13 +326,13 @@ if st.session_state.teacher_logged:
         )
 
         if downloaded:
-            st.success("ดาวน์โหลดสำเร็จแล้ว ✓")
+            st.success("Download Complete ✓")
 
 
 # ---------- ARCHIVE (หน้าใหม่) ----------
 if st.session_state.teacher_logged:
     with tabs[3]:
-        st.header("📦 Archive — ดาวน์โหลดกิจกรรมเก่าทั้งหมด")
+        st.header("📦 Archive — All Activity")
 
         ensure_local_dir()
         archive_files = sorted(os.listdir(ARCHIVE_DIR))
