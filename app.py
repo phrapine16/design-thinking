@@ -48,7 +48,7 @@ def save_responses(df):
 
 def upsert_response(student_id, name, activity, answer):
     df = load_responses()
-    mask = (df["StudentID"] == student_id) & (df["Activity"] == activity)
+    mask = (df["StudentID"] == student_id) & (df["Send"] == activity)
 
     if mask.any():
         idx = df[mask].index[0]
