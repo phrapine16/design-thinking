@@ -147,8 +147,8 @@ with tabs[0]:
     students = load_students()
 
     with st.form("student_form", clear_on_submit=True):
-        sid = st.text_input("Student ID (เช่น S001)")
-        act = st.text_input("ชื่อกิจกรรม")
+        sid = st.text_input("Student ID")
+        act = st.text_input("Activity Name")
         ans = st.text_area("คำตอบ (Essay)")
         submit = st.form_submit_button("Activity")
 
@@ -158,7 +158,7 @@ with tabs[0]:
         else:
             name = students.loc[students["StudentID"] == sid, "Name"].values[0]
             upsert_response(sid, name, act, ans)
-            st.success("ส่งงานสำเร็จ!")
+            st.success("Complete!")
 
 
 # ---------- TEACHER LOGIN ----------
