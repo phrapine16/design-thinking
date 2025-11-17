@@ -142,7 +142,7 @@ else:
 
 # ---------- STUDENT ----------
 with tabs[0]:
-    st.header("👨‍🎓 ส่งงานกิจกรรม")
+    st.header("👨‍🎓 Activity")
 
     students = load_students()
 
@@ -150,7 +150,7 @@ with tabs[0]:
         sid = st.text_input("Student ID (เช่น S001)")
         act = st.text_input("ชื่อกิจกรรม")
         ans = st.text_area("คำตอบ (Essay)")
-        submit = st.form_submit_button("ส่งงาน")
+        submit = st.form_submit_button("Activity")
 
     if submit:
         if sid == "" or act == "" or sid not in students["StudentID"].values:
@@ -182,7 +182,7 @@ if not st.session_state.teacher_logged:
 # ---------- TEACHER ----------
 if st.session_state.teacher_logged:
     with tabs[1]:
-        st.header("👨‍🏫 แก้ไขคะแนน (Auto-Save แบบ Excel)")
+        st.header("👨‍🏫 Score")
 
         resp = load_responses()
 
@@ -192,10 +192,10 @@ if st.session_state.teacher_logged:
         if "confirm_delete" not in st.session_state:
             st.session_state.confirm_delete = False
 
-        st.markdown("### 🗑️ ลบกิจกรรมเก่า (เก็บไฟล์ก่อนลบ)")
+        
 
         # ปุ่มเริ่มการลบ (เปิด popup)
-        if st.button("🗑️ Delete — เก็บกิจกรรมเก่าแล้วเริ่มใหม่"):
+        if st.button("🗑️ Delete Activity"):
             st.session_state.confirm_delete = True
             st.rerun()
 
@@ -203,14 +203,14 @@ if st.session_state.teacher_logged:
         if st.session_state.confirm_delete:
             try:
                 # popup modal
-                with st.modal("⚠ ยืนยันการลบกิจกรรมเก่าทั้งหมด"):
+                with st.modal("⚠ Confirm Delete Activity"):
                     st.write("ระบบจะเก็บไฟล์ responses.csv ปัจจุบันไว้ใน Archive และล้างข้อมูลทั้งหมดทันที")
-                    st.write("ต้องการดำเนินการต่อหรือไม่?")
+                    st.write("Confirm Delete?")
 
                     col1, col2 = st.columns(2)
 
                     with col1:
-                        if st.button("✅ ยืนยันการลบ"):
+                        if st.button("✅ Confirm Delete"):
                             import shutil
                             import datetime
                             
