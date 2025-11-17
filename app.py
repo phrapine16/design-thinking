@@ -149,7 +149,7 @@ with tabs[0]:
     with st.form("student_form", clear_on_submit=True):
         sid = st.text_input("Student ID")
         act = st.text_input("Activity Name")
-        ans = st.text_area("คำตอบ (Essay)")
+        ans = st.text_area("Answer")
         submit = st.form_submit_button("Activity")
 
     if submit:
