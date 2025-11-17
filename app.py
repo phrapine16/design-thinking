@@ -300,7 +300,7 @@ if st.session_state.teacher_logged:
 # ---------- SUMMARY ----------
 if st.session_state.teacher_logged:
     with tabs[2]:
-        st.header("📊 Summary — รวมคะแนนทุกกิจกรรม")
+        st.header("📊 Summary Activity Score")
 
         students = load_students()
         resp = load_responses()
@@ -309,7 +309,7 @@ if st.session_state.teacher_logged:
         st.dataframe(summary, use_container_width=True)
 
         st.markdown("---")
-        st.subheader("⬇ ดาวน์โหลดรายงาน Excel")
+        st.subheader("⬇ Download Summary Report")
 
         import io
         output = io.BytesIO()
@@ -319,7 +319,7 @@ if st.session_state.teacher_logged:
         excel_data = output.getvalue()
 
         downloaded = st.download_button(
-            label="📥 ดาวน์โหลดไฟล์ Summary.xlsx",
+            label="📥 Summary Report.xlsx",
             data=excel_data,
             file_name="Summary_AllActivities.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
