@@ -13,39 +13,46 @@ STUDENTS_RAW_URL = f"https://raw.githubusercontent.com/{GITHUB_USER}/{GITHUB_REP
 LOCAL_DATA_DIR = "/tmp"
 RESPONSES_LOCAL_PATH = os.path.join(LOCAL_DATA_DIR, "responses.csv")
 
-# simple teacher credentials (change if needed)
+# simple teacher credentials
 DEFAULT_TEACHERS = {"teacher": "1234"}
 
 # ---------------- HELPERS ----------------
 def ensure_local_dir():
-    if not os.path.isdir(LOCAL_DATA_DIR):
-        try:
-            os.makedirs(LOCAL_DATA_DIR, exist_ok=True)
-        except Exception:
-            pass
+    os.makedirs(LOCAL_DATA_DIR, exist_ok=True)
 
 def load_students():
     try:
         df = pd.read_csv(STUDENTS_RAW_URL, dtype=str)
-        if "StudentID" not in df.columns or "Name" not in df.columns:
-            st.error("ไฟล์ students.csv ต้องมีคอลัมน์ StudentID และ Name")
-            return pd.DataFrame(columns=["StudentID","Name"])
-        df = df[["StudentID","Name"]].astype(str)
+        df = df[["StudentID", "Name"]].astype(str)
         return df
-    except Exception as e:
-        st.error("ไม่สามารถโหลด students.csv จาก GitHub ได้: " + str(e))
+    except:
+        st.error("โหลด students.csv จาก GitHub ไม่สำเร็จ")
         return pd.DataFrame(columns=["StudentID","Name"])
 
 def load_responses():
+    """โหลด responses.csv และแก้ให้มีคอลัมน์ครบเสมอ"""
     ensure_local_dir()
+
+    required_cols = ["StudentID", "Name", "Activity", "Answer", "Score", "Status"]
+
     if os.path.exists(RESPONSES_LOCAL_PATH):
         try:
             df = pd.read_csv(RESPONSES_LOCAL_PATH, dtype=str)
+
+            # เติมคอลัมน์ที่หายไป
+            for c in required_cols:
+                if c not in df.columns:
+                    df[c] = ""
+
+            # เรียงคอลัมน์
+            df = df[required_cols]
+
             return df
-        except Exception:
+        except:
             pass
-    # create empty if missing or corrupted
-    df = pd.DataFrame(columns=["StudentID","Name","Activity","Answer","Score","Status"])
+
+    # ถ้าไฟล์พังหรือไม่มี → สร้างใหม่
+    df = pd.DataFrame(columns=required_cols)
     df.to_csv(RESPONSES_LOCAL_PATH, index=False)
     return df
 
@@ -54,271 +61,197 @@ def save_responses(df):
     df.to_csv(RESPONSES_LOCAL_PATH, index=False)
 
 def upsert_response(student_id, name, activity, answer):
-    """
-    If an entry with same StudentID+Activity exists -> overwrite Answer, Score reset, Status to 'รอตรวจ'
-    Else -> append new row.
-    """
+    """ถ้ากิจกรรมซ้ำ → ทับ, ถ้าใหม่ → เพิ่ม"""
     df = load_responses()
-    mask = (df["StudentID"].astype(str) == str(student_id)) & (df["Activity"].astype(str) == str(activity))
+    mask = (df["StudentID"] == student_id) & (df["Activity"] == activity)
+
     if mask.any():
         idx = df[mask].index[0]
-        df.at[idx, "Answer"] = answer
         df.at[idx, "Name"] = name
-        df.at[idx, "Score"] = ""   # reset score on resubmit
+        df.at[idx, "Answer"] = answer
+        df.at[idx, "Score"] = ""
         df.at[idx, "Status"] = "รอตรวจ"
     else:
-        new_row = {
-            "StudentID": student_id,
-            "Name": name,
-            "Activity": activity,
-            "Answer": answer,
-            "Score": "",
-            "Status": "รอตรวจ"
-        }
-        df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
-    save_responses(df)
-    return True
+        df = pd.concat([
+            df,
+            pd.DataFrame([{
+                "StudentID": student_id,
+                "Name": name,
+                "Activity": activity,
+                "Answer": answer,
+                "Score": "",
+                "Status": "รอตรวจ"
+            }])
+        ], ignore_index=True)
 
-def update_score(student_id, activity, score_value, status="ตรวจแล้ว"):
+    save_responses(df)
+
+def update_score(student_id, activity, score_value):
     df = load_responses()
-    mask = (df["StudentID"].astype(str) == str(student_id)) & (df["Activity"].astype(str) == str(activity))
+    mask = (df["StudentID"] == student_id) & (df["Activity"] == activity)
+
     if mask.any():
         idx = df[mask].index[0]
-        df.at[idx, "Score"] = str(score_value)
-        df.at[idx, "Status"] = status
+        df.at[idx, "Score"] = score_value
+        df.at[idx, "Status"] = "ตรวจแล้ว"
         save_responses(df)
         return True
     return False
 
-def sanitize_col(s):
-    # create safe column name
+def sanitize(s):
     import re
-    s = str(s)
-    s = re.sub(r"\s+", "_", s.strip())
+    s = str(s).strip()
+    s = re.sub(r"\s+", "_", s)
     s = re.sub(r"[^\w\-]", "", s)
     return s
 
-def build_wide_summary(students_df, responses_df):
-    """
-    Build a wide table:
-    For each Activity occurrence for each student, create columns:
-      Answer_{n}_{ActivitySanitized}, Score_{n}_{ActivitySanitized}, Status_{n}_{ActivitySanitized}
-    The order of activities follows sorted unique activities across responses (stable).
-    Rightmost columns: Summary_TotalScore, Summary_Status (e.g., if any checked?), Summary_CompletedCount
-    """
-    # ensure responses_df as expected
+
+def build_summary(students_df, responses_df):
+    """สร้างตารางสรุปแบบกว้าง (wide)"""
     if responses_df.empty:
-        # create blank wide with students only
         out = students_df.copy()
         out["Summary_TotalScore"] = pd.NA
-        out["Summary_CompletedCount"] = 0
+        out["Summary_Completed"] = 0
         out["Summary_Status"] = "ยังไม่ส่ง"
         return out
 
-    # get list of unique activities across all responses, sorted
-    activities = responses_df["Activity"].astype(str).unique().tolist()
+    activities = responses_df["Activity"].unique().tolist()
 
-    # start with students
     summary = students_df.copy()
 
-    # for each activity, we will try to find for each student the single row (since we upsert, one per student+activity)
     for act in activities:
-        san = sanitize_col(act)
+        san = sanitize(act)
         answer_col = f"Answer_{san}"
         score_col = f"Score_{san}"
         status_col = f"Status_{san}"
-        # prepare a mapping student->value
-        sub = responses_df[responses_df["Activity"].astype(str) == str(act)][["StudentID","Answer","Score","Status"]]
-        # set default NaN
-        mapping_answer = {row["StudentID"]: row["Answer"] for _, row in sub.iterrows()}
-        mapping_score = {row["StudentID"]: row["Score"] for _, row in sub.iterrows()}
-        mapping_status = {row["StudentID"]: row["Status"] for _, row in sub.iterrows()}
-        summary[answer_col] = summary["StudentID"].map(mapping_answer)
-        summary[score_col] = summary["StudentID"].map(mapping_score)
-        summary[status_col] = summary["StudentID"].map(mapping_status)
 
-    # compute Summary_TotalScore (sum numeric scores across Score_* columns)
+        sub = responses_df[responses_df["Activity"] == act]
+
+        map_answer = dict(zip(sub["StudentID"], sub["Answer"]))
+        map_score  = dict(zip(sub["StudentID"], sub["Score"]))
+        map_status = dict(zip(sub["StudentID"], sub["Status"]))
+
+        summary[answer_col] = summary["StudentID"].map(map_answer)
+        summary[score_col]  = summary["StudentID"].map(map_score)
+        summary[status_col] = summary["StudentID"].map(map_status)
+
+    # ---- TotalScore ----
     score_cols = [c for c in summary.columns if c.startswith("Score_")]
-    def sum_scores(row):
-        total = 0.0
-        any_num = False
+
+    def total(row):
+        s = 0
+        found = False
         for c in score_cols:
-            v = row.get(c, None)
-            try:
-                if pd.isna(v) or v == "" or str(v).lower() in ("none","nan"):
-                    continue
-                num = float(str(v))
-                total += num
-                any_num = True
-            except Exception:
-                # non-numeric score -> ignore for sum
-                continue
-        if any_num:
-            # return integer if whole
-            if total.is_integer():
-                return int(total)
-            return total
-        return pd.NA
+            v = row[c]
+            if v not in [None, "", "nan", "None"] and pd.notna(v):
+                try:
+                    s += float(v)
+                    found = True
+                except:
+                    pass
+        return int(s) if found else pd.NA
 
-    summary["Summary_TotalScore"] = summary.apply(sum_scores, axis=1)
+    summary["Summary_TotalScore"] = summary.apply(total, axis=1)
 
-    # Summary_CompletedCount: count activities with non-empty status != ยังไม่ส่ง
+    # ---- Completed Count ----
     status_cols = [c for c in summary.columns if c.startswith("Status_")]
-    def count_completed(row):
-        cnt = 0
-        for c in status_cols:
-            v = row.get(c, None)
-            if pd.isna(v):
-                continue
-            if str(v).strip() != "" and str(v).strip() != "ยังไม่ส่ง":
-                cnt += 1
-        return cnt
-    summary["Summary_CompletedCount"] = summary.apply(count_completed, axis=1)
 
-    # Summary_Status: simple rule
-    def summary_status(row):
-        if row["Summary_CompletedCount"] == 0:
-            return "ยังไม่ส่ง"
-        return "มีผลการตรวจ"
-    summary["Summary_Status"] = summary.apply(summary_status, axis=1)
+    def count_done(row):
+        return sum(
+            1 for c in status_cols
+            if str(row[c]).strip() not in ["", "ยังไม่ส่ง", "None", "nan"]
+        )
+
+    summary["Summary_Completed"] = summary.apply(count_done, axis=1)
+    summary["Summary_Status"] = summary["Summary_Completed"].apply(
+        lambda x: "ยังไม่ส่ง" if x == 0 else "มีผลการตรวจ"
+    )
 
     return summary
 
+
 # ---------------- UI ----------------
-st.set_page_config(page_title="Student/Teacher (Activity)", layout="wide")
+st.set_page_config(page_title="Student Activity System", layout="wide")
 st.title("📘 ระบบส่งงานตามกิจกรรม — Student / Teacher")
 
-# session
 if "teacher_logged" not in st.session_state:
     st.session_state.teacher_logged = False
-if "teacher_user" not in st.session_state:
-    st.session_state.teacher_user = None
 
-# logout
-colL, colR = st.columns([3,1])
-with colR:
-    if st.session_state.teacher_logged:
-        if st.button("Logout"):
-            st.session_state.teacher_logged = False
-            st.session_state.teacher_user = None
-            st.rerun()
+# Tabs
+tabs = st.tabs(["Student", "Teacher", "Summary"])
 
-# tabs
-if st.session_state.teacher_logged:
-    tabs = st.tabs(["Student", "Teacher", "Summary"])
-else:
-    tabs = st.tabs(["Student", "Teacher Login"])
-
-# ---------- Student tab ----------
+# -------- Student Tab --------
 with tabs[0]:
-    st.header("👨‍🎓 Student — ส่งงานตามกิจกรรม")
-    st.info("กรอก Student ID, ชื่อกิจกรรม, และคำตอบ (Essay). ถ้าส่งกิจกรรมเดิม จะทับงานเก่า")
+    st.header("👨‍🎓 Student — ส่งงาน")
+    st.info("กรอก Student ID, ชื่อกิจกรรม และคำตอบ หากส่งกิจกรรมเดิมจะทับงานเดิม")
 
     students_df = load_students()
-    if students_df.empty:
-        st.warning("ยังไม่มีรายชื่อนักศึกษา: ตรวจ students.csv")
+
     with st.form("student_form", clear_on_submit=True):
         sid = st.text_input("Student ID (เช่น S001)").strip()
         activity = st.text_input("ชื่อกิจกรรม (เช่น กิจกรรมที่ 1)").strip()
         answer = st.text_area("คำตอบ (Essay)")
-        submit_btn = st.form_submit_button("ส่งงาน")
+        ok = st.form_submit_button("ส่งงาน")
 
-    if submit_btn:
+    if ok:
         if sid == "" or activity == "":
-            st.error("กรุณากรอก Student ID และ ชื่อกิจกรรม")
+            st.error("กรุณากรอกข้อมูลให้ครบ")
         elif sid not in students_df["StudentID"].values:
-            st.error("ไม่พบ Student ID นี้ใน students.csv")
+            st.error("ไม่พบ Student ID นี้ในระบบ")
         else:
             name = students_df.loc[students_df["StudentID"] == sid, "Name"].values[0]
             upsert_response(sid, name, activity, answer)
-            st.success("ส่งงานเรียบร้อย (เก็บ/ทับตาม Activity)")
+            st.success("ส่งงานสำเร็จ!")
 
-# ---------- Teacher login ----------
-if not st.session_state.teacher_logged:
-    with tabs[1]:
-        st.header("🔐 Teacher Login")
-        with st.form("login"):
-            user = st.text_input("Username")
-            pw = st.text_input("Password", type="password")
-            ok = st.form_submit_button("เข้าสู่ระบบ")
-        if ok:
-            teachers = DEFAULT_TEACHERS.copy()
-            try:
-                if "teachers" in st.secrets:
-                    teachers = dict(st.secrets["teachers"])
-            except Exception:
-                pass
-            if user in teachers and teachers[user] == pw:
-                st.session_state.teacher_logged = True
-                st.session_state.teacher_user = user
-                st.rerun()
-            else:
-                st.error("Username หรือ Password ไม่ถูกต้อง")
+# -------- Teacher Tab --------
+with tabs[1]:
+    st.header("👨‍🏫 Teacher — ให้คะแนน")
+    students_df = load_students()
+    resp_df = load_responses()
 
-# ---------- Teacher tab ----------
-if st.session_state.teacher_logged:
-    with tabs[1]:
-        st.header("👨‍🏫 Teacher — ให้คะแนนตามกิจกรรม")
-        students_df = load_students()
-        resp_df = load_responses()
-        st.subheader("รายการการส่งงาน (ทั้งหมด)")
-        st.dataframe(resp_df)
+    st.subheader("📄 งานที่ส่งทั้งหมด")
+    st.dataframe(resp_df, use_container_width=True)
 
-        st.subheader("ให้คะแนน: เลือกนักศึกษา และกิจกรรม")
-        sid_options = students_df["StudentID"].tolist()
-        selected_sid = st.selectbox("เลือก StudentID", sid_options)
+    st.subheader("ให้คะแนน")
+    sid_list = students_df["StudentID"].tolist()
+    sid = st.selectbox("เลือก StudentID", sid_list)
 
-        # activities submitted by this student
-        sub_all = resp_df[resp_df["StudentID"].astype(str) == str(selected_sid)]
-        if sub_all.empty:
-            st.warning("นักศึกษายังไม่ส่งงานใดๆ")
-        else:
-            activity_list = sub_all["Activity"].astype(str).tolist()
-            selected_activity = st.selectbox("เลือก Activity", activity_list)
-            # get the row
-            row = sub_all[sub_all["Activity"] == selected_activity].iloc[0]
-            st.markdown("**คำตอบ:**")
-            st.write(row["Answer"])
+    sub = resp_df[resp_df["StudentID"] == sid]
 
-            score_val = st.text_input("คะแนน (พิมพ์เป็นตัวเลขหรือข้อความได้)", value=str(row.get("Score","")))
-            if st.button("บันทึกคะแนน"):
-                update_ok = update_score(selected_sid, selected_activity, score_val, status="ตรวจแล้ว")
-                if update_ok:
-                    st.success("บันทึกคะแนนเรียบร้อย")
-                else:
-                    st.error("บันทึกไม่สำเร็จ")
+    if sub.empty:
+        st.warning("ยังไม่มีงานส่ง")
+    else:
+        activity_list = sub["Activity"].tolist()
+        act = st.selectbox("เลือกกิจกรรม", activity_list)
 
-# ---------- Summary tab ----------
-if st.session_state.teacher_logged:
-    with tabs[2]:
-        st.header("📊 Summary — แสดงทุกกิจกรรมแบบขยายไปทางขวา และสรุปผลรวมคะแนน")
-        students_df = load_students()
-        resp_df = load_responses()
+        row = sub[sub["Activity"] == act].iloc[0]
+        st.write("**คำตอบ:**")
+        st.info(row["Answer"])
 
-        wide = build_wide_summary(students_df, resp_df)
+        new_score = st.text_input("คะแนน", value=row["Score"])
+        if st.button("บันทึกคะแนน"):
+            update_score(sid, act, new_score)
+            st.success("บันทึกคะแนนแล้ว")
 
-        st.subheader("ตารางสรุป (Activity เป็นคอลัมน์ด้านขวา)")
-        st.dataframe(wide)
+# -------- Summary Tab --------
+with tabs[2]:
+    st.header("📊 Summary")
+    students_df = load_students()
+    resp_df = load_responses()
 
-        # Basic overall stats
-        if "Summary_TotalScore" in wide.columns and wide["Summary_TotalScore"].notna().any():
-            st.write("จำนวนที่มีคะแนนเชิงตัวเลข:", int(wide["Summary_TotalScore"].count()))
-            try:
-                st.write("ผลรวมคะแนนทั้งหมดของกลุ่ม (รวมทุกคน):", float(wide["Summary_TotalScore"].dropna().astype(float).sum()))
-            except Exception:
-                pass
+    summary = build_summary(students_df, resp_df)
 
-        # Export Excel
-        st.markdown("---")
-        st.subheader("Export")
-        output = io.BytesIO()
-        with pd.ExcelWriter(output, engine="openpyxl") as writer:
-            wide.to_excel(writer, index=False, sheet_name="Summary")
-        data = output.getvalue()
+    st.subheader("📌 ตารางสรุป")
+    st.dataframe(summary, use_container_width=True)
 
-        st.download_button("ดาวน์โหลด Excel (.xlsx)", data=data,
-                           file_name="summary_all_activities.xlsx",
-                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-
-st.markdown("---")
-st.write("Note: ระบบเก็บ responses ในเครื่องเซิร์ฟเวอร์ของ Streamlit (/tmp). ถ้าต้องการเก็บถาวร ให้ดาวน์โหลดไฟล์ Excel แล้วอัปโหลดเก็บในที่เก็บของคุณ")
+    # Export Excel
+    st.subheader("📤 Download Excel")
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        summary.to_excel(writer, index=False, sheet_name="Summary")
+    st.download_button(
+        "ดาวน์โหลด Summary.xlsx",
+        data=output.getvalue(),
+        file_name="summary.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
