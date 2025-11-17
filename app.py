@@ -120,7 +120,7 @@ with col2:
         if st.button("Logout"):
             st.session_state.teacher_logged = False
             st.session_state.teacher_user = None
-            st.experimental_rerun()
+            st.rerun()   # <<<<<< แก้แล้ว
 
 
 # Tabs
@@ -182,7 +182,7 @@ if not st.session_state.teacher_logged:
             if user in DEFAULT_TEACHERS and DEFAULT_TEACHERS[user] == pwd:
                 st.session_state.teacher_logged = True
                 st.session_state.teacher_user = user
-                st.experimental_rerun()
+                st.rerun()  # <<<<<< แก้แล้ว
             else:
                 st.error("Username หรือ Password ผิด")
 
