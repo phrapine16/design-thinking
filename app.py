@@ -347,11 +347,11 @@ if st.session_state.teacher_logged:
 
                 with open(file_path, "rb") as file:
                     st.download_button(
-                        label=f"📥 ดาวน์โหลด {f}",
+                        label=f"📥 Download {f}",
                         data=file.read(),
                         file_name=f,
                         mime="text/csv",
                         key=f
                     )
 
-            st.success("ดาวน์โหลดไฟล์เก่าได้ตามต้องการ ✓")
+            st.success("Download Complete ✓")
