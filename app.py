@@ -74,7 +74,7 @@ def upsert_response(student_id, name, activity, answer):
     save_responses(df)
 
 
-# ---------------- SUMMARY (แก้ไขใช้ชื่อ Activity เป็นชื่อคอลัมน์) ----------------
+# ---------------- SUMMARY (เวอร์ชันแก้บั๊ก + ใช้ชื่อ Activity เป็นคอลัมน์) ----------------
 def build_summary(students_df, responses_df):
     if responses_df.empty:
         summary = students_df.copy()
@@ -84,7 +84,7 @@ def build_summary(students_df, responses_df):
     summary = students_df.copy()
     activities = sorted(responses_df["Activity"].dropna().unique())
 
-    # ใช้ชื่อ activity จริงเป็นชื่อคอลัมน์
+    # เพิ่มคอลัมน์ชื่อ Activity จริง
     for act in activities:
         mapping = {
             row["StudentID"]: row["Score"]
@@ -92,23 +92,29 @@ def build_summary(students_df, responses_df):
         }
         summary[act] = summary["StudentID"].map(mapping)
 
-    # สรุปรวมคะแนน
+    # ฟังก์ชันสรุปคะแนนรวมแบบปลอดภัย
     def total(row):
-        s = 0
-        used = False
+        total_score = 0
+        has_value = False
+
         for act in activities:
             v = row.get(act, "")
             if v in ["", None, "nan", "None"]:
                 continue
             try:
-                s += float(v)
-                used = True
+                total_score += float(v)
+                has_value = True
             except:
                 pass
-        return int(s) if used else ""
+
+        if not has_value:
+            return ""
+        try:
+            return int(total_score)
+        except:
+            return total_score
 
     summary["TotalScore"] = summary.apply(total, axis=1)
-
     return summary
 
 
