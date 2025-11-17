@@ -217,4 +217,28 @@ if st.session_state.teacher_logged:
         resp = load_responses()
 
         summary = build_summary(students, resp)
-        st.dataframe(summary)
+        st.dataframe(summary, use_container_width=True)
+
+        st.markdown("---")
+        st.subheader("⬇ ดาวน์โหลดรายงาน Excel")
+
+        import io
+
+        # สร้างไฟล์ Excel ลงในหน่วยความจำ
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine="openpyxl") as writer:
+            summary.to_excel(writer, index=False, sheet_name="Summary")
+
+        excel_data = output.getvalue()
+
+        # ปุ่มดาวน์โหลด
+        downloaded = st.download_button(
+            label="📥 ดาวน์โหลดไฟล์ Summary.xlsx",
+            data=excel_data,
+            file_name="Summary_AllActivities.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+
+        # แจ้งสถานะเมื่อดาวน์โหลดเสร็จ
+        if downloaded:
+            st.success("ดาวน์โหลดสำเร็จแล้ว ✓")
