@@ -10,6 +10,7 @@ STUDENTS_RAW_URL = f"https://raw.githubusercontent.com/{GITHUB_USER}/{GITHUB_REP
 
 LOCAL_DATA_DIR = "/tmp"
 RESPONSES_LOCAL_PATH = os.path.join(LOCAL_DATA_DIR, "responses.csv")
+ARCHIVE_DIR = os.path.join(LOCAL_DATA_DIR, "archive")
 
 DEFAULT_TEACHERS = {"teacher": "1234"}
 
@@ -17,6 +18,7 @@ DEFAULT_TEACHERS = {"teacher": "1234"}
 # ---------------- HELPERS ----------------
 def ensure_local_dir():
     os.makedirs(LOCAL_DATA_DIR, exist_ok=True)
+    os.makedirs(ARCHIVE_DIR, exist_ok=True)
 
 
 def load_students():
@@ -74,7 +76,7 @@ def upsert_response(student_id, name, activity, answer):
     save_responses(df)
 
 
-# ---------------- SUMMARY (เวอร์ชันแก้บั๊ก + ใช้ชื่อ Activity เป็นคอลัมน์) ----------------
+# ---------------- SUMMARY ----------------
 def build_summary(students_df, responses_df):
     if responses_df.empty:
         summary = students_df.copy()
@@ -84,7 +86,6 @@ def build_summary(students_df, responses_df):
     summary = students_df.copy()
     activities = sorted(responses_df["Activity"].dropna().unique())
 
-    # เพิ่มคอลัมน์ชื่อ Activity จริง
     for act in activities:
         mapping = {
             row["StudentID"]: row["Score"]
@@ -92,22 +93,20 @@ def build_summary(students_df, responses_df):
         }
         summary[act] = summary["StudentID"].map(mapping)
 
-    # ฟังก์ชันสรุปคะแนนรวมแบบปลอดภัย
     def total(row):
         total_score = 0
-        has_value = False
-
+        used = False
         for act in activities:
             v = row.get(act, "")
             if v in ["", None, "nan", "None"]:
                 continue
             try:
                 total_score += float(v)
-                has_value = True
+                used = True
             except:
                 pass
 
-        if not has_value:
+        if not used:
             return ""
         try:
             return int(total_score)
@@ -121,6 +120,8 @@ def build_summary(students_df, responses_df):
 # ---------------- UI ----------------
 st.set_page_config(page_title="Student/Teacher Activities", layout="wide")
 
+ensure_local_dir()
+
 if "teacher_logged" not in st.session_state:
     st.session_state.teacher_logged = False
 
@@ -132,9 +133,9 @@ if st.session_state.teacher_logged:
         st.rerun()
 
 
-# Tabs
+# Tabs (เพิ่ม Archive)
 if st.session_state.teacher_logged:
-    tabs = st.tabs(["Student", "Teacher", "Summary"])
+    tabs = st.tabs(["Student", "Teacher", "Summary", "Archive"])
 else:
     tabs = st.tabs(["Student", "Teacher Login"])
 
@@ -223,15 +224,12 @@ if st.session_state.teacher_logged:
         st.subheader("⬇ ดาวน์โหลดรายงาน Excel")
 
         import io
-
-        # สร้างไฟล์ Excel ลงในหน่วยความจำ
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine="openpyxl") as writer:
             summary.to_excel(writer, index=False, sheet_name="Summary")
 
         excel_data = output.getvalue()
 
-        # ปุ่มดาวน์โหลด
         downloaded = st.download_button(
             label="📥 ดาวน์โหลดไฟล์ Summary.xlsx",
             data=excel_data,
@@ -239,6 +237,33 @@ if st.session_state.teacher_logged:
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
 
-        # แจ้งสถานะเมื่อดาวน์โหลดเสร็จ
         if downloaded:
             st.success("ดาวน์โหลดสำเร็จแล้ว ✓")
+
+
+# ---------- ARCHIVE (หน้าใหม่) ----------
+if st.session_state.teacher_logged:
+    with tabs[3]:
+        st.header("📦 Archive — ดาวน์โหลดกิจกรรมเก่าทั้งหมด")
+
+        ensure_local_dir()
+        archive_files = sorted(os.listdir(ARCHIVE_DIR))
+
+        if not archive_files:
+            st.info("ยังไม่มีไฟล์กิจกรรมเก่าที่ถูกเก็บไว้")
+        else:
+            st.write("รายการไฟล์กิจกรรมเก่าที่สำรองไว้:")
+
+            for f in archive_files:
+                file_path = os.path.join(ARCHIVE_DIR, f)
+
+                with open(file_path, "rb") as file:
+                    st.download_button(
+                        label=f"📥 ดาวน์โหลด {f}",
+                        data=file.read(),
+                        file_name=f,
+                        mime="text/csv",
+                        key=f
+                    )
+
+            st.success("ดาวน์โหลดไฟล์เก่าได้ตามต้องการ ✓")
