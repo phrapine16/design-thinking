@@ -89,32 +89,32 @@ def build_summary(students_df, responses_df):
     summary = students_df.copy()
     activities = sorted(responses_df["Activity"].dropna().unique())
 
+    # ใช้ชื่อ activity จริงเป็นชื่อคอลัมน์ใน summary
     for act in activities:
-        col_score = f"Score_{sanitize(act)}"
+        col_score = act  # ใช้ชื่อกิจกรรมเป็นชื่อคอลัมน์
         mapping = {
             row["StudentID"]: row["Score"]
             for _, row in responses_df[responses_df["Activity"] == act].iterrows()
         }
         summary[col_score] = summary["StudentID"].map(mapping)
 
-    score_cols = [c for c in summary.columns if c.startswith("Score_")]
+    # รวมคะแนนทั้งหมด
+    def calc_total(row):
+        total = 0
+        used = False
+        for act in activities:
+            v = row.get(act, "")
+            if v not in ["", None, "nan", "None"]:
+                try:
+                    total += float(v)
+                    used = True
+                except:
+                    pass
+        return int(total) if used else ""
 
-    def total(row):
-        s = 0
-        found = False
-        for c in score_cols:
-            v = row[c]
-            if pd.isna(v) or v == "" or v is None:
-                continue
-            try:
-                s += float(v)
-                found = True
-            except:
-                pass
-        return int(s) if found else ""
-
-    summary["TotalScore"] = summary.apply(total, axis=1)
+    summary["TotalScore"] = summary.apply(calc_total, axis=1)
     return summary
+
 
 
 # ---------------- UI ----------------
