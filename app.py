@@ -186,27 +186,115 @@ if st.session_state.teacher_logged:
 
         resp = load_responses()
 
+        # =======================
+        # ปุ่ม DELETE + POPUP
+        # =======================
+        if "confirm_delete" not in st.session_state:
+            st.session_state.confirm_delete = False
+
+        st.markdown("### 🗑️ ลบกิจกรรมเก่า (เก็บไฟล์ก่อนลบ)")
+
+        # ปุ่มเริ่มการลบ (เปิด popup)
+        if st.button("🗑️ Delete — เก็บกิจกรรมเก่าแล้วเริ่มใหม่"):
+            st.session_state.confirm_delete = True
+            st.rerun()
+
+        # ถ้าอยู่ในสถานะยืนยัน → แสดง popup
+        if st.session_state.confirm_delete:
+            try:
+                # popup modal
+                with st.modal("⚠ ยืนยันการลบกิจกรรมเก่าทั้งหมด"):
+                    st.write("ระบบจะเก็บไฟล์ responses.csv ปัจจุบันไว้ใน Archive และล้างข้อมูลทั้งหมดทันที")
+                    st.write("ต้องการดำเนินการต่อหรือไม่?")
+
+                    col1, col2 = st.columns(2)
+
+                    with col1:
+                        if st.button("✅ ยืนยันการลบ"):
+                            import shutil
+                            import datetime
+                            
+                            ensure_local_dir()
+                            ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                            archive_filename = f"responses_{ts}.csv"
+                            archive_path = os.path.join(ARCHIVE_DIR, archive_filename)
+
+                            # 1) เก็บ responses.csv เก่า
+                            if os.path.exists(RESPONSES_LOCAL_PATH):
+                                shutil.copy2(RESPONSES_LOCAL_PATH, archive_path)
+
+                            # 2) ล้างข้อมูลสำหรับว่างใหม่
+                            empty_df = pd.DataFrame(columns=["StudentID", "Name", "Activity", "Answer", "Score"])
+                            save_responses(empty_df)
+
+                            st.success(f"📦 เก็บกิจกรรมเก่าแล้ว: {archive_filename}")
+                            st.success("🧹 ลบกิจกรรมเก่าเรียบร้อย! เริ่มใช้ใหม่ได้เลย")
+
+                            st.session_state.confirm_delete = False
+                            st.rerun()
+
+                    with col2:
+                        if st.button("❌ ยกเลิก"):
+                            st.session_state.confirm_delete = False
+                            st.rerun()
+
+            except Exception:
+                # fallback ถ้า Streamlit ไม่มี modal
+                st.warning("ยืนยันการลบกิจกรรมเก่าทั้งหมด? การลบนี้ไม่สามารถย้อนกลับได้")
+                col1, col2 = st.columns(2)
+
+                with col1:
+                    if st.button("Confirm Delete (fallback)"):
+                        import shutil
+                        import datetime
+                        ensure_local_dir()
+
+                        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                        archive_filename = f"responses_{ts}.csv"
+                        archive_path = os.path.join(ARCHIVE_DIR, archive_filename)
+
+                        if os.path.exists(RESPONSES_LOCAL_PATH):
+                            shutil.copy2(RESPONSES_LOCAL_PATH, archive_path)
+
+                        empty_df = pd.DataFrame(columns=["StudentID", "Name", "Activity", "Answer", "Score"])
+                        save_responses(empty_df)
+
+                        st.success(f"📦 เก็บกิจกรรมเก่าแล้ว: {archive_filename}")
+                        st.success("🧹 ลบกิจกรรมเก่าเรียบร้อย")
+
+                        st.session_state.confirm_delete = False
+                        st.rerun()
+
+                with col2:
+                    if st.button("Cancel (fallback)"):
+                        st.session_state.confirm_delete = False
+                        st.rerun()
+
+        # =======================
+        # ตารางแก้ไขคะแนน
+        # =======================
+        st.write("---")
+        st.subheader("📄 แก้ไขคะแนนนักศึกษา")
+
         if resp.empty:
             st.info("ยังไม่มีงานที่ส่ง")
         else:
-            st.write("แก้ไขคะแนนได้ทันที ↓")
-
             edited = st.data_editor(
                 resp,
                 num_rows="dynamic",
                 column_config={
                     "Score": st.column_config.TextColumn(
                         "Score",
-                        help="พิมพ์คะแนนได้ทันที จะเซฟอัตโนมัติ",
+                        help="พิมพ์คะแนนได้ทันที จะบันทึกอัตโนมัติ",
                     )
                 },
                 disabled=["StudentID", "Name", "Activity", "Answer"],
             )
-
             if not edited.equals(resp):
                 save_responses(edited)
                 st.success("บันทึกข้อมูลอัตโนมัติแล้ว ✓")
                 st.rerun()
+
 
 
 # ---------- SUMMARY ----------
