@@ -274,10 +274,10 @@ if st.session_state.teacher_logged:
         # ตารางแก้ไขคะแนน
         # =======================
         st.write("---")
-        st.subheader("📄 แก้ไขคะแนนนักศึกษา")
+        st.subheader("📄 Student Score")
 
         if resp.empty:
-            st.info("ยังไม่มีงานที่ส่ง")
+            st.info("No Activity")
         else:
             edited = st.data_editor(
                 resp,
