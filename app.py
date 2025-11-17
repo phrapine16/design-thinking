@@ -150,7 +150,7 @@ with tabs[0]:
         sid = st.text_input("Student ID")
         act = st.text_input("Activity Name")
         ans = st.text_area("Answer")
-        submit = st.form_submit_button("Activity")
+        submit = st.form_submit_button("Send")
 
     if submit:
         if sid == "" or act == "" or sid not in students["StudentID"].values:
